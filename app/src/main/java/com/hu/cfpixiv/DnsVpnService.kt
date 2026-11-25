@@ -102,9 +102,10 @@ class DnsVpnService : VpnService() {
 
     private fun log(msg: String) {
         runCatching {
-            File(filesDir, "core").mkdirs()
+            val base = getExternalFilesDir("core") ?: File(filesDir, "core")
+            base.mkdirs()
             val ts = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())
-            File(filesDir, "core/vpn.log").appendText("$ts $msg\n")
+            File(base, "vpn.log").appendText("$ts $msg\n")
         }
     }
 

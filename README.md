@@ -77,7 +77,15 @@ Pixiv 主站必须走 HTTP/3 才能访问（TCP/443 会被重置），所以 DNS
 - nginx 配置语法 `nginx -t` 通过。
 - 空 SNI 反代链路：本机 nginx + 同样的 upstream/Host/Referer 能拿到 Pixiv 响应。
 
-诊断：VPN 的收发统计写在 `files/core/vpn.log`（`adb shell run-as cn.hugengron cat files/core/vpn.log`）：
+诊断：运行时目录在 `/storage/emulated/0/Android/data/cn.hugengron/files/core/`
+（文件管理器可见，部分系统需用 MT 管理器 / Solid Explorer 才能进 Android/data）：
+
+- `core.log`：DNS / nginx 进程日志
+- `error.log`：nginx 错误
+- `vpn.log`：VPN 收发统计
+- `ca.crt`：需要安装的 CA
+
+
 看到 `loop start` 但没有 `DNS 查询 ok=` 说明系统没把查询送进 TUN；出现 `转发失败` 说明 Go DNS 没在 `127.0.0.1:5353` 响应。
 
 未验证：

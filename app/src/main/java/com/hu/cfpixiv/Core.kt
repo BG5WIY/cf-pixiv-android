@@ -13,7 +13,8 @@ import java.util.concurrent.TimeUnit
  */
 class Core(private val ctx: Context) {
 
-    val dir = File(ctx.filesDir, "core").apply { mkdirs() }
+    // 优先放外部私有目录，文件管理器可直接查看；不可用时退回内部存储
+    val dir = (ctx.getExternalFilesDir("core") ?: File(ctx.filesDir, "core")).apply { mkdirs() }
     private val nativeDir = ctx.applicationInfo.nativeLibraryDir
     private val logFile = File(dir, "core.log")
 
