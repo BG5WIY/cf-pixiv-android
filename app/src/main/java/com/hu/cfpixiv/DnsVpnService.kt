@@ -7,11 +7,15 @@ import android.app.PendingIntent
 import android.content.Intent
 import android.net.VpnService
 import android.os.ParcelFileDescriptor
+import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
  * 只接管 DNS 的 VPN：把系统 DNS 指向 10.111.222.1，
@@ -27,16 +31,21 @@ class DnsVpnService : VpnService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (running) return START_STICKY
         foreground()
+        // 设备侧地址与 DNS 服务器必须是两个不同 IP，否则内核把发往 DNS 的包当本地环回，不进 TUN。
+        // 不调用 addDisallowedApplication：否则 WebView 的 DNS 也会绕过本 VPN。
         val b = Builder()
             .setSession("CF Pixiv DNS")
-            .addAddress("10.111.222.1", 32)
+            .addAddress("10.111.222.2", 24)
             .addDnsServer("10.111.222.1")
-            .addRoute("10.111.222.1", 32)
+            .addRoute("10.111.222.0", 24)
             .setBlocking(true)
             .setMtu(1500)
-        runCatching { b.addDisallowedApplication(packageName) }
-        tun = b.establish() ?: return START_NOT_STICKY
+        tun = b.establish() ?: run {
+            log("establish() 返回 null")
+            return START_NOT_STICKY
+        }
         running = true
+        log("tun up: addr=10.111.222.2/24 dns=10.111.222.1")
         worker = Thread(::loop, "dns-tun").apply { start() }
         return START_STICKY
     }
@@ -64,6 +73,14 @@ class DnsVpnService : VpnService() {
         }
     }
 
+    private fun log(msg: String) {
+        runCatching {
+            File(filesDir, "core").mkdirs()
+            val ts = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())
+            File(filesDir, "core/vpn.log").appendText("$ts $msg\n")
+        }
+    }
+
     private fun loop() {
         val fd = tun ?: return
         val input = FileInputStream(fd.fileDescriptor)
@@ -76,10 +93,14 @@ class DnsVpnService : VpnService() {
             }
         }.getOrNull() ?: return
 
+        var ok = 0
+        var fail = 0
+        log("loop start")
         while (running && !Thread.interrupted()) {
             val n = try {
                 input.read(buf)
             } catch (e: Exception) {
+                log("tun read 结束: $e")
                 break
             }
             if (n <= 0 || (buf[0].toInt() shr 4) != 4) continue
@@ -97,7 +118,14 @@ class DnsVpnService : VpnService() {
                 rb.copyOf(rp.length)
             } catch (e: Exception) {
                 null
-            } ?: continue
+            }
+            if (resp == null) {
+                fail++
+                if (fail == 1 || fail % 10 == 0) log("转发失败 fail=$fail（检查 DNS 进程 127.0.0.1:5353）")
+                continue
+            }
+            ok++
+            if (ok == 1 || ok % 50 == 0) log("DNS 查询 ok=$ok fail=$fail")
             writeBack(buf, n, ihl, resp, output)
         }
         runCatching { local.close() }

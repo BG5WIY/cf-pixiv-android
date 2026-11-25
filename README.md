@@ -8,7 +8,7 @@
 |---|---|
 | `libdoh3dns.so` | Go 写的本地 DNS（源码在 `core/`，由本机 cf-doh3-dns 项目移植而来）：上游只走 `https://cloudflare-dns.com/dns-query` 的 **HTTP/3/QUIC**，无 TCP 回退；给 HTTPS/SVCB 记录注入 `alpn="h3"`；把 `i.pximg.net` 劫持到 `127.0.0.1` |
 | `libnginx.so` | 交叉编译的 nginx 1.29.4（aarch64 Android，静态链接 OpenSSL 3.5.4 / PCRE2 10.46 / zlib），监听 `127.0.0.1:8443` 反代 `i.pximg.net` |
-| `DnsVpnService` | 只接管 DNS 的 VPN：系统 DNS 指向 `10.111.222.1`，TUN 内 UDP/53 转给本地 Go DNS，**无需 root** |
+| `DnsVpnService` | 只接管 DNS 的 VPN：设备侧地址 `10.111.222.2/24`，系统 DNS 指向 `10.111.222.1`，TUN 内 UDP/53 转给本地 Go DNS，**无需 root** |
 | `PixivClient` | WebView 出口改写：网页里所有 `i.pximg.net` 请求改写到 `127.0.0.1:8443`，这是 443 不可用时的兜底 |
 
 ## i.pximg.net 反代 IP 与方法
@@ -65,7 +65,7 @@ Pixiv 主站必须走 HTTP/3 才能访问（TCP/443 会被重置），所以 DNS
 1. 安装 APK（arm64 设备，Android 9+）。
 2. 点「启动」：拉起 Go DNS（`127.0.0.1:5353`）与 nginx（`127.0.0.1:8443`），
    日志在 `files/core/core.log`、`files/core/error.log`。
-3. 点「VPN」授权后，系统解析走 Cloudflare DoH3。
+3. 点「VPN」授权后，系统解析走 Cloudflare DoH3（若核心未启动，VPN 按钮会先自动启动核心）。
 4. 点「Pixiv」在内置 WebView 打开，图片经本地 nginx 反代。
 
 ## 已验证 / 未验证
@@ -75,6 +75,9 @@ Pixiv 主站必须走 HTTP/3 才能访问（TCP/443 会被重置），所以 DNS
 - Go DNS 的 DoH3 上游可用：`-probe example.com` 返回 Cloudflare 结果。
 - nginx 配置语法 `nginx -t` 通过。
 - 空 SNI 反代链路：本机 nginx + 同样的 upstream/Host/Referer 能拿到 Pixiv 响应。
+
+诊断：VPN 的收发统计写在 `files/core/vpn.log`（`adb shell run-as com.hu.cfpixiv cat files/core/vpn.log`）：
+看到 `loop start` 但没有 `DNS 查询 ok=` 说明系统没把查询送进 TUN；出现 `转发失败` 说明 Go DNS 没在 `127.0.0.1:5353` 响应。
 
 未验证：
 

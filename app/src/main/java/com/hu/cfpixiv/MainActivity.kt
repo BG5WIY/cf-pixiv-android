@@ -42,7 +42,21 @@ class MainActivity : Activity() {
         }
         btn("启动") { status.text = "启动中…"; Thread { val s = core.start(); runOnUiThread { status.text = s } }.start() }
         btn("停止") { core.stop(); status.text = "已停止" }
-        btn("VPN") { toggleVpn() }
+        btn("VPN") {
+            if (core.isRunning()) {
+                toggleVpn()
+            } else {
+                // VPN 依赖本地 DNS 进程，没启动就先拉起来
+                status.text = "启动中…"
+                Thread {
+                    val msg = core.start()
+                    runOnUiThread {
+                        status.text = msg
+                        toggleVpn()
+                    }
+                }.start()
+            }
+        }
         btn("Pixiv") { web.loadUrl("https://www.pixiv.net/") }
 
         web = WebView(this).apply {
