@@ -5,7 +5,8 @@ ROOT=$(cd "$(dirname "$0")" && pwd)
 SDK=${ANDROID_HOME:-$HOME/android-sdk}
 OUT=$SDK/out
 JAVA_HOME=${JAVA_HOME:-/usr/lib/jvm/java-17-openjdk}
-GRADLE=${GRADLE:-$(ls -d "$HOME"/.gradle/wrapper/dists/gradle-9.2.1-bin/*/gradle-9.2.1/bin/gradle | head -1)}
+# AGP 8.13 与 Gradle >= 9.6 不兼容，请用 9.2.x
+GRADLE=${GRADLE:-$(command -v gradle || ls -d "$HOME"/.gradle/wrapper/dists/gradle-9.2.1-bin/*/gradle-9.2.1/bin/gradle 2>/dev/null | head -1)}
 
 echo "== Go DNS 核心 (android/arm64)"
 (cd "$ROOT/core" && GOOS=android GOARCH=arm64 CGO_ENABLED=0 \

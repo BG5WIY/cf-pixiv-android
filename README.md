@@ -31,7 +31,9 @@
 
 ## 构建
 
-依赖：JDK 17、Android SDK（platform-35、build-tools 35.0.0、NDK r27c）、Go 1.27。
+依赖：JDK 17、Android SDK（platform-35、platform-tools、build-tools 35.0.0、NDK r27c）、Go 1.27、Gradle 9.2.x。
+
+> AGP 8.13 不能配 Gradle 9.6+（内部 API 被移除），请勿用更新的 Gradle。
 
 ```bash
 ./build.sh
