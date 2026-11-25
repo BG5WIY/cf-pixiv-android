@@ -76,7 +76,7 @@ Pixiv 主站必须走 HTTP/3 才能访问（TCP/443 会被重置），所以 DNS
 - nginx 配置语法 `nginx -t` 通过。
 - 空 SNI 反代链路：本机 nginx + 同样的 upstream/Host/Referer 能拿到 Pixiv 响应。
 
-诊断：VPN 的收发统计写在 `files/core/vpn.log`（`adb shell run-as com.hu.cfpixiv cat files/core/vpn.log`）：
+诊断：VPN 的收发统计写在 `files/core/vpn.log`（`adb shell run-as cn.hugengron cat files/core/vpn.log`）：
 看到 `loop start` 但没有 `DNS 查询 ok=` 说明系统没把查询送进 TUN；出现 `转发失败` 说明 Go DNS 没在 `127.0.0.1:5353` 响应。
 
 未验证：

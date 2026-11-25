@@ -8,7 +8,7 @@ android {
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.hu.cfpixiv"
+        applicationId = "cn.hugengron"
         minSdk = 28
         targetSdk = 35
         versionCode = 1
