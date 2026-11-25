@@ -1,0 +1,15 @@
+# 构建产物
+build/
+app/build/
+.gradle/
+.kotlin/
+local.properties
+*.apk
+cf-pixiv-android-arm64.apk
+core/dns-linux
+
+# 编译出的原生二进制（由 build.sh 生成）
+app/src/main/jniLibs/
+
+# 日志
+*.log
