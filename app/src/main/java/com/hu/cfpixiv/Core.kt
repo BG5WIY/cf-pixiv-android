@@ -35,6 +35,9 @@ class Core(private val ctx: Context) {
         stop()
         val sb = StringBuilder()
         copyAsset("nginx/mime.types")
+        copyAsset("nginx/i.pximg.net.crt")
+        copyAsset("nginx/i.pximg.net.key")
+        copyAsset("nginx/ca.crt")
         if (!portFree(proxyPort)) proxyPort = freePort(18443)
         writeNginxConf()
 
@@ -64,7 +67,7 @@ class Core(private val ctx: Context) {
             "-listen", "127.0.0.1:$dnsPort",
             "-doh", "https://cloudflare-dns.com/dns-query",
             "-hijack", "i.pximg.net",
-            "-hijack-lan-ip", "127.0.0.1",
+            "-hijack-lan-ip", "10.111.222.3",
             "-lan-cidr", "0.0.0.0/0",
             "-h3-hint", "inject",
             "-cache-size", "4096"
@@ -145,7 +148,24 @@ class Core(private val ctx: Context) {
             "210.140.139.149", "210.140.139.150"
         ).joinToString("\n") { "        server $it:443;" }
 
-        // nginx 上游直连 Pixiv 边缘 IP；SNI 固定 i.pximg.net，避免依赖本地 DNS 造成回环
+        val proxyLocation = """
+            location / {
+                proxy_pass https://i_pximg;
+                proxy_http_version 1.1;
+                proxy_set_header Connection "";
+                proxy_set_header Host i.pximg.net;
+                proxy_set_header Referer "https://www.pixiv.net/";
+                proxy_set_header User-Agent ${'$'}http_user_agent;
+                proxy_ssl_server_name on;
+                # i.pximg.net 的 SNI 会被阻断，Pixiv-Nginx 同样用空 SNI
+                proxy_ssl_name "";
+                proxy_connect_timeout 8s;
+                proxy_read_timeout 30s;
+                proxy_next_upstream error timeout http_429 http_404 http_500 http_502 http_503 http_504;
+            }
+        """.trimIndent()
+
+        // nginx 上游直连 Pixiv 边缘 IP；SNI 走空 SNI，避免触发阻断
         val conf = """
             worker_processes 1;
             error_log  ${dir.absolutePath}/error.log warn;
@@ -167,20 +187,16 @@ class Core(private val ctx: Context) {
                 server {
                     listen 127.0.0.1:$proxyPort;
                     server_name i.pximg.net;
-                    location / {
-                        proxy_pass https://i_pximg;
-                        proxy_http_version 1.1;
-                        proxy_set_header Connection "";
-                        proxy_set_header Host i.pximg.net;
-                        proxy_set_header Referer "https://www.pixiv.net/";
-                        proxy_set_header User-Agent ${'$'}http_user_agent;
-                        proxy_ssl_server_name on;
-                        # 关键：i.pximg.net 的 SNI 会被阻断，Pixiv-Nginx 同样用空 SNI
-                        proxy_ssl_name "";
-                        proxy_connect_timeout 8s;
-                        proxy_read_timeout 30s;
-                        proxy_next_upstream error timeout http_429 http_404 http_500 http_502 http_503 http_504;
-                    }
+                    $proxyLocation
+                }
+                # VPN 场景：客户端连 i.pximg.net:443，由 TUN 转发到这里，需要 TLS
+                server {
+                    listen 127.0.0.1:8444 ssl;
+                    server_name i.pximg.net;
+                    ssl_certificate     ${dir.absolutePath}/i.pximg.net.crt;
+                    ssl_certificate_key ${dir.absolutePath}/i.pximg.net.key;
+                    ssl_protocols TLSv1.2 TLSv1.3;
+                    $proxyLocation
                 }
             }
         """.trimIndent()

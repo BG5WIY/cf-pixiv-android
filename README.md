@@ -65,7 +65,8 @@ Pixiv 主站必须走 HTTP/3 才能访问（TCP/443 会被重置），所以 DNS
 1. 安装 APK（arm64 设备，Android 9+）。
 2. 点「启动」：拉起 Go DNS（`127.0.0.1:5353`）与 nginx（`127.0.0.1:8443`），
    日志在 `files/core/core.log`、`files/core/error.log`。
-3. 点「VPN」授权后，系统解析走 Cloudflare DoH3（若核心未启动，VPN 按钮会先自动启动核心）。
+3. 点「VPN」授权后，系统解析走 Cloudflare DoH3，且 `i.pximg.net:443` 被 VPN 截获转给本地反代
+   （若核心未启动，VPN 按钮会先自动启动核心）。
 4. 点「Pixiv」在内置 WebView 打开，图片经本地 nginx 反代。
 
 ## 已验证 / 未验证
