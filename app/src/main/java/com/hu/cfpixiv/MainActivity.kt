@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Intent
 import android.graphics.Color
 import android.net.VpnService
+import java.net.InetAddress
 import android.os.Bundle
 import android.view.ViewGroup
 import android.webkit.WebView
@@ -58,6 +59,22 @@ class MainActivity : Activity() {
             }
         }
         btn("Pixiv") { web.loadUrl("https://www.pixiv.net/") }
+        btn("自检") {
+            status.text = "自检中…"
+            Thread {
+                val lines = StringBuilder()
+                for (host in listOf("www.pixiv.net", "i.pximg.net")) {
+                    val r = runCatching { DnsProbe.query(host) }
+                        .getOrElse { listOf("错误: ${it.message}") }
+                    lines.append(host).append(" → ").append(r.joinToString()).append('\n')
+                }
+                lines.append("系统: ").append(
+                    runCatching { InetAddress.getAllByName("www.pixiv.net").joinToString { it.hostAddress ?: "?" } }
+                        .getOrElse { "错误: ${it.message}" }
+                )
+                runOnUiThread { status.text = lines.toString() }
+            }.start()
+        }
 
         web = WebView(this).apply {
             settings.javaScriptEnabled = true
