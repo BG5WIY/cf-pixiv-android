@@ -6,18 +6,24 @@
 
 | 组件 | 说明 |
 |---|---|
-| `libdoh3dns.so` | Go 写的本地 DNS（复用 `~/cf-doh3-dns` 的逻辑）：上游只走 `https://cloudflare-dns.com/dns-query` 的 **HTTP/3/QUIC**，无 TCP 回退；给 HTTPS/SVCB 记录注入 `alpn="h3"`；把 `i.pximg.net` 劫持到 `127.0.0.1` |
+| `libdoh3dns.so` | Go 写的本地 DNS（源码在 `core/`，由本机 cf-doh3-dns 项目移植而来）：上游只走 `https://cloudflare-dns.com/dns-query` 的 **HTTP/3/QUIC**，无 TCP 回退；给 HTTPS/SVCB 记录注入 `alpn="h3"`；把 `i.pximg.net` 劫持到 `127.0.0.1` |
 | `libnginx.so` | 交叉编译的 nginx 1.29.4（aarch64 Android，静态链接 OpenSSL 3.5.4 / PCRE2 10.46 / zlib），监听 `127.0.0.1:8443` 反代 `i.pximg.net` |
 | `DnsVpnService` | 只接管 DNS 的 VPN：系统 DNS 指向 `10.111.222.1`，TUN 内 UDP/53 转给本地 Go DNS，**无需 root** |
 | `PixivClient` | WebView 出口改写：网页里所有 `i.pximg.net` 请求改写到 `127.0.0.1:8443`，这是 443 不可用时的兜底 |
 
 ## i.pximg.net 反代 IP 与方法
 
-来自本机 `~/Pixiv-Nginx/conf/site-pixiv.conf` 的探测结果：
+参考 [mashirozx/Pixiv-Nginx](https://github.com/mashirozx/Pixiv-Nginx) 项目：
 
-- 上游：`upstream i-pximg-net { least_conn; 210.140.139.131~138、149~150:443; keepalive 16; }`
-- 方法：`proxy_pass https://i-pximg-net`，`Host: i.pximg.net`，`Referer: https://www.pixiv.net/`
-- **关键**：原项目用 `shared-proxy-params-empty-sni.conf` 里的 `proxy_ssl_name ""`（空 SNI）。
+- 上游 IP 列表来自 [conf/site-pixiv.conf](https://github.com/mashirozx/Pixiv-Nginx/blob/main/conf/site-pixiv.conf) 的 `upstream i-pximg-net`：
+  `210.140.139.131~138`、`210.140.139.149~150`，`least_conn` + `keepalive 16`。
+- 反代方法同文件的 `server_name *.pximg.net` 块：`proxy_pass https://i-pximg-net`、
+  `Host: i.pximg.net`、`Referer: https://www.pixiv.net/`。
+- **关键**：空 SNI 组合自
+  [conf/shared-proxy-params-empty-sni.conf](https://github.com/mashirozx/Pixiv-Nginx/blob/main/conf/shared-proxy-params-empty-sni.conf)
+  （`proxy_ssl_name ""`）与
+  [conf/shared-proxy-params-1.conf](https://github.com/mashirozx/Pixiv-Nginx/blob/main/conf/shared-proxy-params-1.conf)
+  （`proxy_ssl_server_name on`）。
 
 实测：对上游发 `SNI=i.pximg.net` 的 TLS 握手会被直接 reset（SNI 阻断）；
 不带 SNI 则 TLS 1.3 握手成功，证书为 `CN=pximg.net`。所以 App 里的 nginx 用空 SNI。
