@@ -28,6 +28,15 @@
 实测：对上游发 `SNI=i.pximg.net` 的 TLS 握手会被直接 reset（SNI 阻断）；
 不带 SNI 则 TLS 1.3 握手成功，证书为 `CN=pximg.net`。所以 App 里的 nginx 用空 SNI。
 
+## 可用性判断（HTTP/3）
+
+Pixiv 主站必须走 HTTP/3 才能访问（TCP/443 会被重置），所以 DNS 始终给 HTTPS 记录注入 `alpn="h3"`。
+启动时 App 会用 DNS 核心的 `-probe` 实打实发一次 HTTP/3 查询（UDP/443 → Cloudflare）来判断当前网络是否允许 QUIC：
+
+- 通：状态栏显示「QUIC : 可用，Pixiv 主站走 h3」
+- 不通：显示「不可用（UDP/443 被阻断，Pixiv 主站会连接重置）」，此时 i.pximg.net 反代仍可用，但主站打不开
+- WebView 主站加载失败时会直接提示，避免看不出是 h3 的问题
+
 ## 两条工作路径
 
 1. **系统级**（需要 root 才能监听 443）：DNS 把 `i.pximg.net` 劫持到 `127.0.0.1`，

@@ -4,6 +4,7 @@ import android.content.Context
 import java.io.File
 import java.net.InetSocketAddress
 import java.net.ServerSocket
+import java.util.concurrent.TimeUnit
 
 /**
  * 管理两个原生进程：
@@ -26,6 +27,10 @@ class Core(private val ctx: Context) {
 
     fun isRunning() = dns?.isAlive == true || web?.isAlive == true
 
+    /** 最近一次启动时探测到的 QUIC(UDP/443) 可用性 */
+    var quicAvailable: Boolean? = null
+        private set
+
     fun start(): String {
         stop()
         val sb = StringBuilder()
@@ -39,6 +44,16 @@ class Core(private val ctx: Context) {
             return "原生二进制缺失：${dnsBin.exists()} ${nginxBin.exists()}"
         }
 
+        // 可用性判断:Pixiv 主站必须走 HTTP/3(TCP/443 会被重置),所以 h3 标记始终开启;
+        // 这里探测的是"本机到 Cloudflare 的 UDP/443 是否通",通了才说明 WebView 的 h3 有戏。
+        quicAvailable = probeQuic(dnsBin)
+        sb.append("QUIC : ")
+            .append(
+                if (quicAvailable == true) "可用，Pixiv 主站走 h3"
+                else "不可用（UDP/443 被阻断，Pixiv 主站会连接重置）"
+            )
+            .append('\n')
+
         dns = launch(dnsBin,
             "-listen", "127.0.0.1:$dnsPort",
             "-doh", "https://cloudflare-dns.com/dns-query",
@@ -47,7 +62,15 @@ class Core(private val ctx: Context) {
             "-lan-cidr", "0.0.0.0/0",
             "-h3-hint", "inject",
             "-cache-size", "4096"
-        ).also { sb.append("DNS  : ").append(if (it.isAlive) "127.0.0.1:$dnsPort (DoH3)" else "启动失败").append('\n') }
+        ).also {
+            sb.append("DNS  : ").append(
+                when {
+                    !it.isAlive -> "启动失败"
+                    quicAvailable == true -> "127.0.0.1:$dnsPort (DoH3)"
+                    else -> "127.0.0.1:$dnsPort (进程在，但 QUIC 不通，解析会失败)"
+                }
+            ).append('\n')
+        }
 
         web = launch(nginxBin,
             "-p", dir.absolutePath,
@@ -73,6 +96,20 @@ class Core(private val ctx: Context) {
         pb.redirectOutput(ProcessBuilder.Redirect.appendTo(logFile))
         return pb.start()
     }
+
+    /**
+     * 用 DNS 核心自带的 -probe 实打实发一次 HTTP/3 查询（UDP/443 → Cloudflare）。
+     * 失败说明当前网络不允许 QUIC，此时给客户端注入 alpn=h3 只会让它先撞墙再回退，
+     * 表现为连接被重置、图片加载失败，所以启动时据此决定是否开启 h3 标记。
+     */
+    private fun probeQuic(bin: File): Boolean = runCatching {
+        val p = ProcessBuilder(bin.absolutePath, "-probe", "example.com", "-timeout", "4s")
+            .redirectErrorStream(true)
+            .start()
+        val done = p.waitFor(8, TimeUnit.SECONDS)
+        if (!done) p.destroyForcibly()
+        done && p.exitValue() == 0
+    }.getOrDefault(false)
 
     private fun portFree(p: Int) = runCatching {
         ServerSocket().use {

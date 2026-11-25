@@ -1,6 +1,7 @@
 package com.hu.cfpixiv
 
 import android.net.Uri
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
@@ -12,7 +13,16 @@ import java.net.URL
  * 把网页里所有 i.pximg.net 请求转到本地 nginx 反代（127.0.0.1:proxyPort），
  * 这是 443 不可用时的兜底路径：不改网页源码，只在 WebView 出口改写。
  */
-class PixivClient(private val core: Core) : WebViewClient() {
+class PixivClient(
+    private val core: Core,
+    private val onError: (String) -> Unit = {}
+) : WebViewClient() {
+
+    override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
+        if (request.isForMainFrame) {
+            onError("主站加载失败：${error.description}（Pixiv 需要 h3，QUIC 不通时会被重置）")
+        }
+    }
 
     override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
         val u = request.url
