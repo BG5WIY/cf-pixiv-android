@@ -46,6 +46,12 @@ class Core(private val ctx: Context) {
 
         // 可用性判断:Pixiv 主站必须走 HTTP/3(TCP/443 会被重置),所以 h3 标记始终开启;
         // 这里探测的是"本机到 Cloudflare 的 UDP/443 是否通",通了才说明 WebView 的 h3 有戏。
+        // bind 443 的权限只看端口号,与绑在哪个地址(含 TUN 的 10.x)无关;非 root 一般拿不到
+        val can443 = runCatching { ServerSocket(443).use { } }.isSuccess
+        sb.append("443  : ")
+            .append(if (can443) "可绑定（有特权）" else "不可绑定（非 root，反代走 $proxyPort）")
+            .append('\n')
+
         quicAvailable = probeQuic(dnsBin)
         sb.append("QUIC : ")
             .append(
