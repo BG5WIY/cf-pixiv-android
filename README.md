@@ -1,48 +1,65 @@
 # cf-pixiv-android
 
-安卓端 Pixiv 图片加速：**Cloudflare DoH3 本地 DNS + 本地 nginx 反代 i.pximg.net**。
+安卓端 Pixiv 图片加速：**Cloudflare DoH(HTTP/3) 本地 DNS + 有限路由 VPN + 本地 nginx 反代 i.pximg.net**。
+
+不需要 root，不影响其他 App 上网。
 
 ## 组成部分
 
 | 组件 | 说明 |
 |---|---|
-| `libdoh3dns.so` | Go 写的本地 DNS（源码在 `core/`，由本机 cf-doh3-dns 项目移植而来）：上游只走 `https://cloudflare-dns.com/dns-query` 的 **HTTP/3/QUIC**，无 TCP 回退；给 HTTPS/SVCB 记录注入 `alpn="h3"`；把 `i.pximg.net` 劫持到 `127.0.0.1` |
-| `libnginx.so` | 交叉编译的 nginx 1.29.4（aarch64 Android，静态链接 OpenSSL 3.5.4 / PCRE2 10.46 / zlib），监听 `127.0.0.1:8443` 反代 `i.pximg.net` |
-| `DnsVpnService` | 只接管 DNS 的 VPN：设备侧地址 `10.111.222.2/24`，系统 DNS 指向 `10.111.222.1`，TUN 内 UDP/53 转给本地 Go DNS，**无需 root** |
-| `PixivClient` | WebView 出口改写：网页里所有 `i.pximg.net` 请求改写到 `127.0.0.1:8443`，这是 443 不可用时的兜底 |
+| `libdoh3dns.so` | Go 写的本地 DNS：上游只走 `https://cloudflare-dns.com/dns-query` 的 **HTTP/3/QUIC**（无 TCP 回退），给 HTTPS/SVCB 记录注入 `alpn="h3"`，把 `i.pximg.net` 劫持到 `10.111.222.3` |
+| `libnginx.so` | 交叉编译的 nginx 1.29.4（aarch64 Android，静态链接 OpenSSL/PCRE2/zlib）：`127.0.0.1:8444` 提供 TLS 反代，`127.0.0.1:8443` 提供明文反代 |
+| `DnsVpnService` | 只接管 DNS 与 `i.pximg.net:443` 的 VPN：路由仅 `10.111.222.0/24`，在 TUN 里用用户态 TCP 把 `10.111.222.3:443` 转到 `127.0.0.1:8444`，**无需 root 即可让客户端以为连的是 443** |
+| CA | 打包一套自签 CA + `i.pximg.net` 证书，App 内可导出 `ca.crt` 供系统信任 |
+
+## 工作流程
+
+1. 点「启动」：拉起本地 DNS（DoH3 上游）与 nginx 反代
+2. 点「VPN」：系统 DNS 指向 `10.111.222.1`，`i.pximg.net:443` 被 TUN 截获转给本地反代
+3. 装 CA：App 内「导出CA」→ 设置 → 安全 → 加密与凭据 → 安装证书 → CA 证书
+4. 用系统浏览器（Chrome / Edge / Firefox）打开 Pixiv，图片自动走本地反代
+
+## 为什么不会拖垮其他 App
+
+VPN 只 `addRoute("10.111.222.0", 24)`：只有被 DNS 劫持到该网段的域名才会进 TUN，其余流量完全走系统原网络。Watt Toolkit 用的是 `AddRoute("0.0.0.0", 0)` 全局接管，它的 tun2http + 本地代理一旦卡住就全网断网。
 
 ## i.pximg.net 反代 IP 与方法
 
-参考 [mashirozx/Pixiv-Nginx](https://github.com/mashirozx/Pixiv-Nginx) 项目：
+参考 [mashirozx/Pixiv-Nginx](https://github.com/mashirozx/Pixiv-Nginx)：
 
 - 上游 IP 列表来自 [conf/site-pixiv.conf](https://github.com/mashirozx/Pixiv-Nginx/blob/main/conf/site-pixiv.conf) 的 `upstream i-pximg-net`：
-  `210.140.139.131~138`、`210.140.139.149~150`，`least_conn` + `keepalive 16`。
-- 反代方法同文件的 `server_name *.pximg.net` 块：`proxy_pass https://i-pximg-net`、
-  `Host: i.pximg.net`、`Referer: https://www.pixiv.net/`。
-- **关键**：空 SNI 组合自
+  `210.140.139.131~138`、`210.140.139.149~150`，`least_conn` + `keepalive 16`
+- 反代方法同文件的 `server_name *.pximg.net` 块：`Host: i.pximg.net`、`Referer: https://www.pixiv.net/`
+- **关键**：空 SNI，组合自
   [conf/shared-proxy-params-empty-sni.conf](https://github.com/mashirozx/Pixiv-Nginx/blob/main/conf/shared-proxy-params-empty-sni.conf)
-  （`proxy_ssl_name ""`）与
-  [conf/shared-proxy-params-1.conf](https://github.com/mashirozx/Pixiv-Nginx/blob/main/conf/shared-proxy-params-1.conf)
-  （`proxy_ssl_server_name on`）。
+  与 [conf/shared-proxy-params-1.conf](https://github.com/mashirozx/Pixiv-Nginx/blob/main/conf/shared-proxy-params-1.conf)
 
-实测：对上游发 `SNI=i.pximg.net` 的 TLS 握手会被直接 reset（SNI 阻断）；
-不带 SNI 则 TLS 1.3 握手成功，证书为 `CN=pximg.net`。所以 App 里的 nginx 用空 SNI。
+实测：对上游发 `SNI=i.pximg.net` 的 TLS 握手会被直接 reset；不带 SNI 才能完成 TLS 1.3 握手（证书 `CN=pximg.net`）。
 
-## 可用性判断（HTTP/3）
+## 关于 h3 与浏览器
 
-Pixiv 主站必须走 HTTP/3 才能访问（TCP/443 会被重置），所以 DNS 始终给 HTTPS 记录注入 `alpn="h3"`。
-启动时 App 会用 DNS 核心的 `-probe` 实打实发一次 HTTP/3 查询（UDP/443 → Cloudflare）来判断当前网络是否允许 QUIC：
+Pixiv 主站必须走 HTTP/3 才能访问（TCP/443 会被重置）。DNS 始终给 HTTPS 记录注入 `alpn="h3"`：
 
-- 通：状态栏显示「QUIC : 可用，Pixiv 主站走 h3」
-- 不通：显示「不可用（UDP/443 被阻断，Pixiv 主站会连接重置）」，此时 i.pximg.net 反代仍可用，但主站打不开
-- WebView 主站加载失败时会直接提示，避免看不出是 h3 的问题
+- Chrome / Edge（Chromium）：会查询 HTTPS 记录，直接走 h3
+- Firefox：会查询 HTTPS 记录，可在 `about:config` 调整
+- **Android WebView 不会查询 HTTPS 记录**，所以 WebView 内（含本 App 曾经的「内置访问」）在 TCP 被墙时无法打开主站。因此 App 已移除内置 WebView，统一改用系统浏览器
 
-## 两条工作路径
+App 启动时用 DNS 核心的 `-probe` 实打实发一次 HTTP/3 查询（UDP/443 → Cloudflare）判断当前网络是否允许 QUIC：
 
-1. **系统级**（需要 root 才能监听 443）：DNS 把 `i.pximg.net` 劫持到 `127.0.0.1`，
-   其他 App 也走本地反代。
-2. **内置浏览器**（默认，无需 root）：App 内 WebView 打开 Pixiv，
-   `shouldInterceptRequest` 把 `i.pximg.net` 改写成 `127.0.0.1:8443`。
+- 可用：状态栏显示「QUIC : 可用，Pixiv 主站走 h3」
+- 不可用：显示「不可用（UDP/443 被阻断，Pixiv 主站会连接重置）」，此时 `i.pximg.net` 反代仍可用，但主站打不开
+
+## 诊断
+
+运行时目录在 `/storage/emulated/0/Android/data/cn.hugengron/files/core/`（部分系统需用 MT 管理器进入）：
+
+- `core.log`：DNS / nginx 进程日志
+- `error.log`：nginx 错误
+- `vpn.log`：VPN 收发统计（含 `dns i.pximg.net t=1 -> ...`、`dns www.pixiv.net t=65 -> ...`）
+- `ca.crt`：CA 证书
+
+App 内「日志」按钮可直接查看并分享，无需文件管理器。
 
 ## 构建
 
@@ -54,49 +71,25 @@ Pixiv 主站必须走 HTTP/3 才能访问（TCP/443 会被重置），所以 DNS
 ./build.sh
 ```
 
-- `core/`：Go DNS 源码，`GOOS=android GOARCH=arm64 CGO_ENABLED=0` 编译成
-  `jniLibs/arm64-v8a/libdoh3dns.so`。
-- `tools/build-nginx.sh`：编译 OpenSSL → PCRE2 → nginx。为适配 bionic 做了三处源码补丁：
-  运行型特性检测改编译型、`sizeof` 用 LP64 预置、`EPOLL*` 宏比较改为常量。
-- 产物 `cf-pixiv-android-arm64.apk`（约 9.9 MB，debug 签名）。
-
-## 使用
-
-1. 安装 APK（arm64 设备，Android 9+）。
-2. 点「启动」：拉起 Go DNS（`127.0.0.1:5353`）与 nginx（`127.0.0.1:8443`），
-   日志在 `files/core/core.log`、`files/core/error.log`。
-3. 点「VPN」授权后，系统解析走 Cloudflare DoH3，且 `i.pximg.net:443` 被 VPN 截获转给本地反代
-   （若核心未启动，VPN 按钮会先自动启动核心）。
-4. 点「Pixiv」在内置 WebView 打开，图片经本地 nginx 反代。
+- `core/`：Go 源码，`GOOS=android GOARCH=arm64 CGO_ENABLED=0` 编译成 `jniLibs/arm64-v8a/libdoh3dns.so`
+- `tools/build-nginx.sh`：编译 OpenSSL → PCRE2 → nginx。为适配 bionic 做了三处源码补丁：运行型特性检测改编译型、`sizeof` 用 LP64 预置、`EPOLL*` 宏比较改为常量
 
 ## 已验证 / 未验证
 
 已验证（本机 x86_64）：
 
-- Go DNS 的 DoH3 上游可用：`-probe example.com` 返回 Cloudflare 结果。
-- nginx 配置语法 `nginx -t` 通过。
-- 空 SNI 反代链路：本机 nginx + 同样的 upstream/Host/Referer 能拿到 Pixiv 响应。
+- DoH3 上游可用，`alpn=h3` 正确注入，`i.pximg.net` 劫持到 `10.111.222.3`
+- nginx 配置 `nginx -t` 通过；TLS 反代返回 200；证书链对 CA 校验通过
+- 空 SNI 反代链路可用
+- 边缘 IP 仅使用 IPv4（避免设备无 IPv6 路由时 `no route to host`）
 
-诊断：运行时目录在 `/storage/emulated/0/Android/data/cn.hugengron/files/core/`
-（文件管理器可见，部分系统需用 MT 管理器 / Solid Explorer 才能进 Android/data）：
+真机已验证：Edge 经 VPN 解析并走 h3 访问 Pixiv 成功；i.pximg.net 劫持生效。
 
-- `core.log`：DNS / nginx 进程日志
-- `error.log`：nginx 错误
-- `vpn.log`：VPN 收发统计
-- `ca.crt`：需要安装的 CA
-
-
-看到 `loop start` 但没有 `DNS 查询 ok=` 说明系统没把查询送进 TUN；出现 `转发失败` 说明 Go DNS 没在 `127.0.0.1:5353` 响应。
-
-未验证：
-
-- 未在真机/arm64 设备上运行（本机无 arm64 模拟器，waydroid 为 x86_64 且无 root）。
-- nginx/Go 以 ELF 形式放在 `jniLibs`、从 `nativeLibraryDir` 执行，依赖
-  `android:extractNativeLibs="true"` 的解压可执行权限；这是常见做法但需真机确认。
-- WebView 中 Pixiv 的登录/API 行为未测试。
+未验证：不同 ROM 的用户 CA 信任策略、第三方 App 是否信任用户 CA。
 
 ## 已知限制
 
-- 上游 IP 会随 Pixiv 调度变化，失效时改 `Core.kt` 里的 `upstream` 列表。
-- 非 root 无法监听 443，只能走内置浏览器路径。
-- 系统「私人 DNS」会绕过本 App 的 DNS，需要关闭。
+- 上游 IP 会随 Pixiv 调度变化，失效时改 `Core.kt` 里的 `upstream` 列表
+- 系统「私人 DNS」（DoT）会绕过本 App 的 DNS，需要关闭
+- Android 7+ 用户 CA 默认只被 Chromium 系浏览器信任，其他 App 需自行声明
+- `shouldInterceptRequest` 拿不到 POST body，因此不再走拦截方案

@@ -54,8 +54,8 @@ const (
 var seedIPs = []string{
 	"104.16.248.249",
 	"104.16.249.249",
-	"2606:4700::6810:f8f9",
-	"2606:4700::6810:f9f9",
+	"104.16.250.249",
+	"104.16.251.249",
 }
 
 type config struct {
@@ -81,6 +81,9 @@ type config struct {
 	hijackRemote string
 	hijackTTL    uint
 	lanCIDRs     string
+
+	// HTTP/3 forward proxy for clients that can't do h3 themselves (WebView)
+	proxyListen string
 }
 
 type stats struct {
@@ -129,6 +132,9 @@ func main() {
 	go app.refreshLoop(ctx)
 	go app.statsLoop(ctx)
 	go app.healthCheck(ctx)
+	if cfg.proxyListen != "" {
+		go app.serveHttp3Proxy(ctx, cfg.proxyListen)
+	}
 
 	if err := app.serve(ctx); err != nil {
 		log.Fatalf("serve: %v", err)
@@ -155,6 +161,7 @@ func parseFlags() config {
 	flag.StringVar(&cfg.hijackRemote, "hijack-remote", "hugengron.cn", "A records of this domain are returned to non-LAN clients")
 	flag.UintVar(&cfg.hijackTTL, "hijack-ttl", 60, "TTL of hijacked answers, seconds")
 	flag.StringVar(&cfg.lanCIDRs, "lan-cidr", "192.168.1.0/24", "comma-separated CIDRs treated as LAN")
+	flag.StringVar(&cfg.proxyListen, "proxy-listen", "", "HTTP/3 forward proxy listen address, e.g. 127.0.0.1:8445")
 	flag.Parse()
 
 	if cfg.h3Hint != "inject" && cfg.h3Hint != "amend" && cfg.h3Hint != "off" {
@@ -333,11 +340,10 @@ func (a *App) dohQuery(ctx context.Context, req *dns.Msg) (*dns.Msg, error) {
 func extractIPs(m *dns.Msg) []string {
 	var out []string
 	for _, rr := range m.Answer {
-		switch v := rr.(type) {
-		case *dns.A:
+		// 只用 IPv4 边缘 IP：移动网络/VPN 下 IPv6 常不可达，
+		// 混入 AAAA 会让 QUIC 连接直接 "no route to host"。
+		if v, ok := rr.(*dns.A); ok {
 			out = append(out, v.A.String())
-		case *dns.AAAA:
-			out = append(out, v.AAAA.String())
 		}
 	}
 	return out
@@ -367,7 +373,7 @@ func (a *App) refreshLoop(ctx context.Context) {
 // refreshIPs re-resolves the DoH hostname through the DoH connection itself.
 func (a *App) refreshIPs(ctx context.Context) {
 	var found []string
-	for _, qtype := range []uint16{dns.TypeA, dns.TypeAAAA} {
+	for _, qtype := range []uint16{dns.TypeA} {
 		q := new(dns.Msg)
 		q.SetQuestion(dns.Fqdn(a.cfg.dohHost), qtype)
 		q.RecursionDesired = true
@@ -396,7 +402,7 @@ func (a *App) refreshIPs(ctx context.Context) {
 // It is only used at startup and never replaces the self-refresh through DoH.
 func (a *App) bootstrapResolve(ctx context.Context) {
 	var found []string
-	for _, qtype := range []uint16{dns.TypeA, dns.TypeAAAA} {
+	for _, qtype := range []uint16{dns.TypeA} {
 		q := new(dns.Msg)
 		q.SetQuestion(dns.Fqdn(a.cfg.dohHost), qtype)
 		q.RecursionDesired = true
@@ -423,6 +429,87 @@ func (a *App) bootstrapResolve(ctx context.Context) {
 }
 
 // ---------------------------------------------------------------- DNS server
+
+// serveHttp3Proxy accepts plain HTTP on loopback and forwards each request to
+// the origin over HTTP/3. WebView won't consult HTTPS/SVCB records, so without
+// this the page can only try TCP:443, which is reset in restricted networks.
+func (a *App) serveHttp3Proxy(ctx context.Context, addr string) {
+	clients := sync.Map{}
+	getClient := func(host string) *http.Client {
+		if v, ok := clients.Load(host); ok {
+			return v.(*http.Client)
+		}
+		rt := &http3.Transport{
+			TLSClientConfig: &tls.Config{ServerName: host},
+		}
+		c := &http.Client{
+			Transport: rt,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		}
+		clients.Store(host, c)
+		return c
+	}
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 客户端用 127.0.0.1 连接，真实目标域名由 X-Forwarded-Host 指定
+		host := r.Header.Get("X-Forwarded-Host")
+		if host == "" {
+			host = r.Host
+		}
+		if i := strings.IndexByte(host, ':'); i > 0 {
+			host = host[:i]
+		}
+		if host == "" {
+			http.Error(w, "missing Host", http.StatusBadRequest)
+			return
+		}
+		target := "https://" + host + r.URL.RequestURI()
+		req, err := http.NewRequestWithContext(r.Context(), r.Method, target, r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		for k, vv := range r.Header {
+			if strings.EqualFold(k, "Host") || strings.EqualFold(k, "Accept-Encoding") {
+				continue
+			}
+			for _, v := range vv {
+				req.Header.Add(k, v)
+			}
+		}
+		req.Host = host
+		resp, err := getClient(host).Do(req)
+		if err != nil {
+			a.logf("h3 proxy %s %s: %v", r.Method, target, err)
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+		for k, vv := range resp.Header {
+			for _, v := range vv {
+				w.Header().Add(k, v)
+			}
+		}
+		w.WriteHeader(resp.StatusCode)
+		_, _ = io.Copy(w, resp.Body)
+	})
+
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	go func() {
+		<-ctx.Done()
+		_ = srv.Close()
+	}()
+	a.logf("http3 proxy listening on %s", addr)
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		a.logf("http3 proxy: %v", err)
+	}
+}
 
 func (a *App) serve(ctx context.Context) error {
 	udpSrv := &dns.Server{
@@ -780,6 +867,11 @@ func (a *App) hijackResponse(w dns.ResponseWriter, req *dns.Msg) *dns.Msg {
 	m := new(dns.Msg)
 	m.SetReply(req)
 	m.RecursionAvailable = true
+	// 回显 EDNS：部分 resolver(尤其 Android netd) 会丢弃缺少 OPT 的响应，
+	// 丢弃后回退到物理网络 DNS，劫持就失效了。
+	if opt := req.IsEdns0(); opt != nil {
+		m.SetEdns0(opt.UDPSize(), opt.Do())
+	}
 
 	switch q.Qtype {
 	case dns.TypeA:

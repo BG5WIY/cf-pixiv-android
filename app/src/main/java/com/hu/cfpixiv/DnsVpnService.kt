@@ -18,6 +18,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
 import kotlin.concurrent.thread
 import kotlin.random.Random
 
@@ -48,6 +49,11 @@ class DnsVpnService : VpnService() {
         private const val PSH = 0x08
         private const val ACK = 0x10
 
+        /** 供 UI 读取的 VPN 运行状态 */
+        @Volatile
+        var running: Boolean = false
+            private set
+
         private fun ipToInt(s: String): Int {
             val p = s.split('.').map { it.toInt() }
             return (p[0] shl 24) or (p[1] shl 16) or (p[2] shl 8) or p[3]
@@ -72,6 +78,7 @@ class DnsVpnService : VpnService() {
             return START_NOT_STICKY
         }
         running = true
+        Companion.running = true
         log("tun up: addr=$CLIENT_ADDR/24 dns=$DNS_ADDR proxy=$VPN_ADDR:443 -> 127.0.0.1:$LOCAL_PROXY_PORT")
         worker = Thread(::loop, "tun").apply { start() }
         return START_STICKY
@@ -115,15 +122,7 @@ class DnsVpnService : VpnService() {
         val output = FileOutputStream(fd.fileDescriptor)
         val buf = ByteArray(32767)
 
-        val dns = runCatching {
-            DatagramSocket().apply {
-                soTimeout = 4000
-                connect(InetAddress.getByName("127.0.0.1"), 5353)
-            }
-        }.getOrNull()
-
-        var dnsOk = 0
-        var dnsFail = 0
+        val dnsPool = Executors.newFixedThreadPool(4) { r -> Thread(r, "dns-fwd").apply { isDaemon = true } }
         log("loop start")
         while (running && !Thread.interrupted()) {
             val n = try {
@@ -137,32 +136,67 @@ class DnsVpnService : VpnService() {
             if (n < ihl + 8) continue
 
             when (buf[9].toInt() and 0xff) {
-                17 -> { // UDP: 只处理 DNS
-                    val dstPort = u16(buf, ihl + 2)
-                    if (dstPort != 53 || dns == null) continue
-                    val q = buf.copyOfRange(ihl + 8, n)
-                    val resp = try {
-                        dns.send(DatagramPacket(q, q.size))
-                        val rb = ByteArray(4096)
-                        val rp = DatagramPacket(rb, rb.size)
-                        dns.receive(rp)
-                        rb.copyOf(rp.length)
-                    } catch (e: Exception) {
-                        null
-                    }
-                    if (resp == null) {
-                        dnsFail++
-                        if (dnsFail == 1 || dnsFail % 10 == 0) log("DNS 转发失败 fail=$dnsFail")
-                        continue
-                    }
-                    dnsOk++
-                    if (dnsOk == 1 || dnsOk % 50 == 0) log("DNS ok=$dnsOk fail=$dnsFail")
-                    writeBack(buf, n, ihl, resp, output, 17)
+                17 -> { // UDP: 只处理 DNS，交给线程池并发转发
+                    if (u16(buf, ihl + 2) != 53) continue
+                    val copy = buf.copyOf(n)
+                    dnsPool.execute { forwardDns(copy, n, ihl, output) }
                 }
                 6 -> handleTcp(buf, n, ihl, output)
             }
         }
-        runCatching { dns?.close() }
+        dnsPool.shutdownNow()
+    }
+
+    /** 每个查询独立 socket，避免并发查询在同一个 socket 上排队等超时 */
+    private fun forwardDns(pkt: ByteArray, n: Int, ihl: Int, out: FileOutputStream) {
+        val q = pkt.copyOfRange(ihl + 8, n)
+        val qname = dnsName(q)
+        val qtype = qtype(q, qname)
+        val resp = try {
+            DatagramSocket().use { s ->
+                s.soTimeout = 4000
+                s.send(DatagramPacket(q, q.size, InetAddress.getByName("127.0.0.1"), 5353))
+                val rb = ByteArray(4096)
+                val rp = DatagramPacket(rb, rb.size)
+                s.receive(rp)
+                rb.copyOf(rp.length)
+            }
+        } catch (e: Exception) {
+            log("dns 转发失败 $qname t=$qtype: ${e.message}")
+            return
+        }
+        // 只记关键查询，避免日志被淹没
+        if (qname.contains("pximg") || qtype == 65) {
+            val rcode = resp[3].toInt() and 0x0f
+            val tc = (resp[2].toInt() and 0x02) != 0
+            log("dns $qname t=$qtype -> ${resp.size}B rcode=$rcode${if (tc) " TC" else ""}")
+        }
+        writeBack(pkt, n, ihl, resp, out, 17)
+    }
+
+    private fun dnsName(q: ByteArray): String {
+        if (q.size < 13) return "?"
+        val sb = StringBuilder()
+        var o = 12
+        while (o < q.size) {
+            val len = q[o].toInt() and 0xff
+            if (len == 0) break
+            if (o + 1 + len > q.size) return sb.toString()
+            if (sb.isNotEmpty()) sb.append('.')
+            sb.append(String(q, o + 1, len))
+            o += len + 1
+        }
+        return sb.toString()
+    }
+
+    private fun qtype(q: ByteArray, qname: String): Int {
+        var o = 12
+        while (o < q.size) {
+            val len = q[o].toInt() and 0xff
+            if (len == 0) { o += 1; break }
+            o += len + 1
+        }
+        return if (o + 2 <= q.size) u16(q, o) else 0
     }
 
     // ---------------- TCP ----------------
@@ -350,7 +384,7 @@ class DnsVpnService : VpnService() {
         p[ihl + 4] = (udpLen shr 8).toByte(); p[ihl + 5] = udpLen.toByte()
         p[ihl + 6] = 0; p[ihl + 7] = 0
         System.arraycopy(dns, 0, p, ihl + 8, dns.size)
-        out.write(p)
+        synchronized(out) { out.write(p) }
     }
 
     private fun u16(b: ByteArray, o: Int): Int =
@@ -376,6 +410,7 @@ class DnsVpnService : VpnService() {
 
     override fun onDestroy() {
         running = false
+        Companion.running = false
         worker?.interrupt()
         conns.values.forEach { runCatching { it.socket.close() } }
         conns.clear()

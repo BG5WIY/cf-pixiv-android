@@ -39,6 +39,7 @@ class Core(private val ctx: Context) {
         copyAsset("nginx/i.pximg.net.crt")
         copyAsset("nginx/i.pximg.net.key")
         copyAsset("nginx/ca.crt")
+        File(dir, "logs").mkdirs()
         if (!portFree(proxyPort)) proxyPort = freePort(18443)
         writeNginxConf()
 
@@ -71,6 +72,8 @@ class Core(private val ctx: Context) {
             "-hijack-lan-ip", "10.111.222.3",
             "-lan-cidr", "0.0.0.0/0",
             "-h3-hint", "inject",
+            "-proxy-listen", "127.0.0.1:8445",
+            "-hijack-ttl", "10",
             "-cache-size", "4096"
         ).also {
             sb.append("DNS  : ").append(
